@@ -1,0 +1,17 @@
+{
+  "name": "@latere/luxsdk",
+  "version": "0.1.0",
+  "description": "TypeScript client for the Latere Lux gateway's native dialect (POST /lux/v1/generate)",
+  "repository": "github:latere-ai/lux-typescript-sdk",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "test": "bun test --coverage"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.6.0"
+  }
+}
