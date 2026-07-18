@@ -1,4 +1,4 @@
-# Publishes @latere/luxsdk to npm on a version tag (v0.1.0 → 0.1.0).
+# Publishes @latere-ai/luxsdk to npm on a version tag (v0.1.0 → 0.1.0).
 # Auth: the NPM_TOKEN repo secret (an npm granular access token with
 # publish rights); --provenance links the package to this build.
 name: publish

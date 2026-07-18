@@ -1,4 +1,4 @@
-# @latere/luxsdk
+# @latere-ai/luxsdk
 
 The TypeScript client for [Latere Lux](https://lux.latere.ai)'s
 native dialect: one typed request/response/stream shape for every
@@ -8,11 +8,11 @@ model Lux routes. Zero runtime dependencies — needs only `fetch` and
 ## Install
 
 ```
-npm install github:latere-ai/lux-typescript-sdk
+npm install @latere-ai/luxsdk
 ```
 
 ```ts
-import { LuxClient, userText } from "@latere/luxsdk";
+import { LuxClient, userText } from "@latere-ai/luxsdk";
 
 const c = new LuxClient("https://lux.latere.ai", { apiKey: process.env.LUX_API_KEY! });
 
