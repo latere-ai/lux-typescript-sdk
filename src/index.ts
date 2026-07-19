@@ -105,6 +105,10 @@ export interface LuxRequest {
   reasoning?: Reasoning;
   schema?: ResponseSchema;
   user_id?: string;
+  /** Cost-attribution tags for this call, sent as the `Lux-Cost-Tag`
+   * header (not a wire body field). Overrides the client's `costTags`
+   * default. */
+  costTags?: Record<string, string>;
 }
 
 export interface Usage {
@@ -188,6 +192,9 @@ export interface LuxClientOptions {
   apiKey?: string;
   /** Per-call bearer (e.g. a rotating JWT); wins over apiKey. */
   tokenSource?: () => Promise<string> | string;
+  /** Default cost-attribution tags for every call (header
+   * `Lux-Cost-Tag`); a per-request `costTags` overrides it. */
+  costTags?: Record<string, string>;
   /** Override the fetch implementation (tests, custom agents). */
   fetch?: typeof fetch;
 }
@@ -196,6 +203,20 @@ const GENERATE_PATH = "/lux/v1/generate";
 const COUNT_TOKENS_PATH = "/lux/v1/count_tokens";
 const LOSS_HEADER = "X-Lux-Compat-Loss";
 const ESTIMATED_HEADER = "X-Lux-Compat-Estimated";
+const COST_TAG_HEADER = "Lux-Cost-Tag";
+
+/** Serialize cost tags to the `Lux-Cost-Tag` wire form: sorted
+ * `key=value` pairs joined by commas, no spaces. An empty/undefined
+ * map yields "". */
+function formatCostTags(tags?: Record<string, string>): string {
+  if (!tags) {
+    return "";
+  }
+  return Object.keys(tags)
+    .sort()
+    .map((k) => `${k}=${tags[k]}`)
+    .join(",");
+}
 
 /** A live event stream. Iterate with `for await`; iteration ends
  * after message_stop. `loss` lists request fields the backend dialect
@@ -219,14 +240,16 @@ export class LuxClient {
 
   /** Non-streaming call; the request's stream flag is overridden off. */
   async generate(req: LuxRequest): Promise<LuxResult> {
-    const resp = await this.post(GENERATE_PATH, { ...req, stream: false });
-    const body = (await resp.json()) as LuxResponse;
-    return { ...body, loss: parseLoss(resp) };
+    const { costTags, ...body } = req;
+    const resp = await this.post(GENERATE_PATH, { ...body, stream: false }, costTags);
+    const out = (await resp.json()) as LuxResponse;
+    return { ...out, loss: parseLoss(resp) };
   }
 
   /** Token count without spending output tokens; no spend gates run. */
   async countTokens(req: LuxRequest): Promise<TokenCount> {
-    const resp = await this.post(COUNT_TOKENS_PATH, { ...req, stream: false });
+    const { costTags, ...rest } = req;
+    const resp = await this.post(COUNT_TOKENS_PATH, { ...rest, stream: false }, costTags);
     const body = (await resp.json()) as { input_tokens: number };
     return {
       input_tokens: body.input_tokens,
@@ -236,7 +259,8 @@ export class LuxClient {
 
   /** Streaming call; the request's stream flag is overridden on. */
   async stream(req: LuxRequest): Promise<LuxStream> {
-    const resp = await this.post(GENERATE_PATH, { ...req, stream: true });
+    const { costTags, ...body } = req;
+    const resp = await this.post(GENERATE_PATH, { ...body, stream: true }, costTags);
     const ct = resp.headers.get("Content-Type") ?? "";
     if (!ct.startsWith("text/event-stream")) {
       throw new LuxError(resp.status, "", `expected an event stream, got ${JSON.stringify(ct)}`);
@@ -255,7 +279,11 @@ export class LuxClient {
     };
   }
 
-  private async post(path: string, payload: unknown): Promise<globalThis.Response> {
+  private async post(
+    path: string,
+    payload: unknown,
+    costTags?: Record<string, string>,
+  ): Promise<globalThis.Response> {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     let bearer = this.opts.apiKey ?? "";
     if (this.opts.tokenSource) {
@@ -263,6 +291,10 @@ export class LuxClient {
     }
     if (bearer) {
       headers["Authorization"] = `Bearer ${bearer}`;
+    }
+    const tags = formatCostTags(costTags ?? this.opts.costTags);
+    if (tags) {
+      headers[COST_TAG_HEADER] = tags;
     }
     const resp = await this.fetchFn(this.baseURL + path, {
       method: "POST",

@@ -103,6 +103,45 @@ describe("generate", () => {
     }
   });
 
+  test("cost tags serialize sorted into Lux-Cost-Tag, absent when unset", async () => {
+    let gotTag: string | null = "sentinel";
+    let gotBody = "";
+    handler = async (req) => {
+      gotTag = req.headers.get("Lux-Cost-Tag");
+      gotBody = await req.text();
+      return new Response(okResponse, { headers: { "Content-Type": "application/json" } });
+    };
+    const c = new LuxClient(base);
+    // Insertion order (tenant, project) differs from sorted order to
+    // prove the header is sorted, not just echoed.
+    await c.generate({
+      model: "m",
+      messages: [userText("x")],
+      costTags: { tenant: "acme", project: "web" },
+    });
+    expect(gotTag).toBe("project=web,tenant=acme");
+    // Cost tags travel as a header, never in the wire body.
+    expect(gotBody).not.toContain("costTags");
+
+    // Absent when unset.
+    await c.generate({ model: "m", messages: [userText("x")] });
+    expect(gotTag).toBeNull();
+  });
+
+  test("client-default cost tags apply and per-call overrides", async () => {
+    let gotTag: string | null = null;
+    handler = (req) => {
+      gotTag = req.headers.get("Lux-Cost-Tag");
+      return new Response(okResponse, { headers: { "Content-Type": "application/json" } });
+    };
+    const c = new LuxClient(base, { costTags: { tenant: "default" } });
+    await c.generate({ model: "m", messages: [userText("x")] });
+    expect(gotTag).toBe("tenant=default");
+
+    await c.generate({ model: "m", messages: [userText("x")], costTags: { tenant: "acme" } });
+    expect(gotTag).toBe("tenant=acme");
+  });
+
   test("tokenSource wins over apiKey", async () => {
     let gotAuth = "";
     handler = (req) => {

@@ -57,6 +57,30 @@ const tc = await c.countTokens({ model: "claude-sonnet-5", messages: [userText("
 `apiKey` is a static bearer (a Lux virtual key). `tokenSource` supplies
 a per-call bearer (e.g. a rotating JWT) and wins over `apiKey`.
 
+## Cost attribution
+
+`costTags` attributes a call's cost to named dimensions within your own
+spend, sent as the `Lux-Cost-Tag` header. It never changes who is billed
+or what the key can reach. Pass a `Record<string, string>`, serialized to
+sorted `key=value` pairs:
+
+```ts
+const c = new LuxClient("https://lux.latere.ai", {
+  apiKey: process.env.LUX_API_KEY!,
+  costTags: { tenant: "acme" }, // client-wide default
+});
+
+// Per call; overrides the client default.
+const res = await c.generate({
+  model: "claude-sonnet-5",
+  messages: [userText("Hi")],
+  costTags: { tenant: "acme", project: "web" }, // sent as project=web,tenant=acme
+});
+```
+
+The gateway validates the value and rejects a malformed one with a
+`400`; the SDK passes it through untouched.
+
 ## Errors and loss
 
 Non-2xx responses throw `LuxError { status, code, message, requestId }`
