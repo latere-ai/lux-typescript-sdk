@@ -1,6 +1,6 @@
 {
   "name": "@latere-ai/luxsdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "TypeScript client for the Latere Lux gateway's native dialect (POST /lux/v1/generate)",
   "repository": "github:latere-ai/lux-typescript-sdk",
   "license": "Apache-2.0",
