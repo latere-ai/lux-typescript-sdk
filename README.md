@@ -2,7 +2,7 @@
 
 The TypeScript client for [Latere Lux](https://lux.latere.ai)'s
 native dialect: one typed request/response/stream shape for every
-model Lux routes. Zero runtime dependencies — needs only `fetch` and
+model Lux routes. Zero runtime dependencies. Needs only `fetch` and
 `ReadableStream` (Node ≥ 18, Bun, Deno, browsers).
 
 ## Install
