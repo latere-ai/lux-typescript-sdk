@@ -6,6 +6,9 @@ import {
   assistantText,
   userText,
   type LuxEvent,
+  ENV_BASE_URL,
+  ENV_API_KEY,
+  DEFAULT_BASE_URL,
 } from "../src/index";
 
 // A programmable fake gateway: each test registers the next handler.
@@ -299,5 +302,73 @@ describe("stream", () => {
     const c = new LuxClient(base);
     const st = await c.stream({ model: "m", messages: [userText("x")] });
     await st.close();
+  });
+});
+
+// The load-bearing compatibility property of the environment fallback is
+// that it fills only what the caller left unset. Every existing call site
+// passes an explicit base and credential, so if the environment could
+// override either, exporting LUX_BASE_URL in a shell would silently
+// redirect programs that never opted in.
+describe("environment fallback", () => {
+  const saved = { base: process.env[ENV_BASE_URL], key: process.env[ENV_API_KEY] };
+  const setEnv = (b?: string, k?: string) => {
+    if (b === undefined) delete process.env[ENV_BASE_URL];
+    else process.env[ENV_BASE_URL] = b;
+    if (k === undefined) delete process.env[ENV_API_KEY];
+    else process.env[ENV_API_KEY] = k;
+  };
+  afterAll(() => setEnv(saved.base, saved.key));
+
+  // The credential is only observable where it lands, on the wire.
+  const authFor = async (c: LuxClient) => {
+    let gotAuth = "";
+    handler = (req) => {
+      gotAuth = req.headers.get("Authorization") ?? "";
+      return new Response(okResponse, { headers: { "content-type": "application/json" } });
+    };
+    await c.generate({ model: "m", messages: [userText("hi")] });
+    return gotAuth;
+  };
+
+  test("explicit arguments beat the environment", async () => {
+    setEnv("https://env.example", "lux_from_env");
+    expect(await authFor(new LuxClient(base, { apiKey: "lux_from_arg" }))).toBe(
+      "Bearer lux_from_arg",
+    );
+  });
+
+  test("the environment fills what was omitted", async () => {
+    setEnv(base, "lux_from_env");
+    expect(await authFor(new LuxClient())).toBe("Bearer lux_from_env");
+  });
+
+  // A tokenSource is a credential, so the env key must not be read at
+  // all; otherwise a stale export would shadow a live token provider.
+  test("a tokenSource suppresses the environment key", async () => {
+    setEnv(base, "lux_from_env");
+    expect(await authFor(new LuxClient(undefined, { tokenSource: () => "live" }))).toBe(
+      "Bearer live",
+    );
+  });
+
+  // An unset credential must stay unset: defaulting to unauthenticated
+  // would turn a misspelled variable into a confusing 401.
+  test("a missing credential stays empty", async () => {
+    setEnv(base, undefined);
+    expect(await authFor(new LuxClient())).toBe("");
+  });
+
+  // Constructed only, never called: these must not reach the public URL.
+  test("an unset base falls back to the public gateway", () => {
+    setEnv(undefined, undefined);
+    expect(new LuxClient()["baseURL"]).toBe(DEFAULT_BASE_URL);
+  });
+
+  // Trailing slashes are trimmed on the env path too, or every request
+  // would carry a doubled separator.
+  test("the environment base is trimmed", () => {
+    setEnv("https://env.example/", undefined);
+    expect(new LuxClient()["baseURL"]).toBe("https://env.example");
   });
 });

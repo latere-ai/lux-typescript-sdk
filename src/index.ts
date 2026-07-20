@@ -199,6 +199,26 @@ export interface LuxClientOptions {
   fetch?: typeof fetch;
 }
 
+/** Gateway base, e.g. `https://lux.latere.ai`. Deliberately not
+ * `LUX_API_URL`: that is the `latere` CLI's own target, and one variable
+ * steering both would let `eval "$(latere lux env --compat lux)"`
+ * silently retarget the CLI from a subshell. */
+export const ENV_BASE_URL = "LUX_BASE_URL";
+/** Carries exactly what `Authorization: Bearer` carries: a `lux_*`
+ * virtual key, or a Latere Auth identity/actor token. */
+export const ENV_API_KEY = "LUX_API_KEY";
+/** Used when neither an explicit base URL nor `LUX_BASE_URL` is set. */
+export const DEFAULT_BASE_URL = "https://lux.latere.ai";
+
+/** Read one variable from the process environment, or "" where there is
+ * no such thing. The SDK is isomorphic: in a browser or a worker
+ * `process` is undefined, and touching it would throw at construction
+ * rather than at the call that actually needs a credential. */
+function envVar(name: string): string {
+  const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
+  return proc?.env?.[name] ?? "";
+}
+
 const GENERATE_PATH = "/lux/v1/generate";
 const COUNT_TOKENS_PATH = "/lux/v1/count_tokens";
 const LOSS_HEADER = "X-Lux-Compat-Loss";
@@ -232,9 +252,25 @@ export class LuxClient {
   private readonly opts: LuxClientOptions;
   private readonly fetchFn: typeof fetch;
 
-  constructor(baseURL: string, opts: LuxClientOptions = {}) {
-    this.baseURL = baseURL.replace(/\/+$/, "");
-    this.opts = opts;
+  /** Both connection values fall back to the environment when omitted,
+   * so a process configured by `eval "$(latere lux env --compat lux)"`
+   * can construct with no arguments:
+   *
+   * ```ts
+   * const c = new LuxClient(); // LUX_BASE_URL + LUX_API_KEY
+   * ```
+   *
+   * Explicit arguments always win: the environment fills only what the
+   * caller left unset, so exporting `LUX_BASE_URL` in a shell can never
+   * redirect a program that passed its own. An omitted credential stays
+   * empty rather than defaulting to unauthenticated, so a misspelled
+   * variable fails at the gateway instead of becoming an anonymous
+   * call. */
+  constructor(baseURL = "", opts: LuxClientOptions = {}) {
+    const base = baseURL || envVar(ENV_BASE_URL) || DEFAULT_BASE_URL;
+    this.baseURL = base.replace(/\/+$/, "");
+    this.opts =
+      opts.apiKey || opts.tokenSource ? opts : { ...opts, apiKey: envVar(ENV_API_KEY) };
     this.fetchFn = opts.fetch ?? fetch;
   }
 
