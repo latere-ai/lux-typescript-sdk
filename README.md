@@ -95,8 +95,15 @@ const res = await c.generate({
 });
 ```
 
-The gateway validates the value and rejects a malformed one with a
-`400`; the SDK passes it through untouched.
+Tags come from a restricted charset, because the header format has no
+escaping: keys match `[A-Za-z0-9._-]+`, values additionally allow `:` and
+`/`. A key is at most 64 bytes, a value 128, and one call carries at most
+8 pairs.
+
+Anything outside that throws `LuxError` before the request is sent, so a
+value like `"b,c=d"` never reaches the gateway as two tags the caller did
+not write. The gateway applies the same rules and answers a `400` for a
+header assembled elsewhere.
 
 ## Errors and loss
 

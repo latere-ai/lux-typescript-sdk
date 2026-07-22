@@ -132,9 +132,9 @@ describe("generate", () => {
   });
 
   test("client-default cost tags apply and per-call overrides", async () => {
-    let gotTag: string | null = null;
+    let gotTag = "unset";
     handler = (req) => {
-      gotTag = req.headers.get("Lux-Cost-Tag");
+      gotTag = req.headers.get("Lux-Cost-Tag") ?? "";
       return new Response(okResponse, { headers: { "Content-Type": "application/json" } });
     };
     const c = new LuxClient(base, { costTags: { tenant: "default" } });
@@ -143,6 +143,108 @@ describe("generate", () => {
 
     await c.generate({ model: "m", messages: [userText("x")], costTags: { tenant: "acme" } });
     expect(gotTag).toBe("tenant=acme");
+  });
+
+  // The wire form has no escaping: the gateway splits the header on ","
+  // then cuts on "=". A "," or "=" inside a value therefore does not fail
+  // loudly, it silently becomes extra tags, so the client must reject it.
+  test("cost tags with , or = in a value are rejected", async () => {
+    // "unset" rather than null: the assertion is that the handler never
+    // ran at all, i.e. nothing was put on the wire.
+    let gotTag = "unset";
+    handler = (req) => {
+      gotTag = req.headers.get("Lux-Cost-Tag") ?? "";
+      return new Response(okResponse, { headers: { "Content-Type": "application/json" } });
+    };
+    const c = new LuxClient(base);
+    await expect(
+      c.generate({ model: "m", messages: [userText("x")], costTags: { a: "b,c=d" } }),
+    ).rejects.toBeInstanceOf(LuxError);
+    expect(gotTag).toBe("unset");
+
+    // The same holds for a key, and for characters outside the charset.
+    await expect(
+      c.generate({ model: "m", messages: [userText("x")], costTags: { "a=b": "c" } }),
+    ).rejects.toBeInstanceOf(LuxError);
+    await expect(
+      c.generate({ model: "m", messages: [userText("x")], costTags: { tenant: "acme corp" } }),
+    ).rejects.toBeInstanceOf(LuxError);
+    // The error names the offending key so the caller can find it.
+    await expect(
+      c.generate({ model: "m", messages: [userText("x")], costTags: { tenant: "a,b" } }),
+    ).rejects.toThrow(/tenant/);
+  });
+
+  // Two distinct tag maps must never produce the same header, or the
+  // gateway attributes spend to dimensions the caller never asked for.
+  test("cost tag serialization is injective", async () => {
+    const headerFor = async (tags: Record<string, string>) => {
+      let gotTag = "unset";
+      handler = (req) => {
+        gotTag = req.headers.get("Lux-Cost-Tag") ?? "";
+        return new Response(okResponse, { headers: { "Content-Type": "application/json" } });
+      };
+      const c = new LuxClient(base);
+      try {
+        await c.generate({ model: "m", messages: [userText("x")], costTags: tags });
+      } catch (err) {
+        return `rejected: ${(err as Error).message}`;
+      }
+      return gotTag;
+    };
+    const collided = await headerFor({ a: "b,c=d" });
+    const honest = await headerFor({ a: "b", c: "d" });
+    expect(honest).toBe("a=b,c=d");
+    expect(collided).not.toBe(honest);
+  });
+
+  test("cost tag bounds are enforced", async () => {
+    let gotTag = "unset";
+    handler = (req) => {
+      gotTag = req.headers.get("Lux-Cost-Tag") ?? "";
+      return new Response(okResponse, { headers: { "Content-Type": "application/json" } });
+    };
+    const c = new LuxClient(base);
+    const reject = (tags: Record<string, string>) =>
+      expect(
+        c.generate({ model: "m", messages: [userText("x")], costTags: tags }),
+      ).rejects.toBeInstanceOf(LuxError);
+
+    // More than 8 dimensions.
+    const nine: Record<string, string> = {};
+    for (let i = 0; i < 9; i++) {
+      nine[`k${i}`] = "v";
+    }
+    await reject(nine);
+
+    // A 65-byte key; 64 is the limit.
+    await reject({ ["k".repeat(65)]: "v" });
+    // A 129-byte value; 128 is the limit.
+    await reject({ k: "v".repeat(129) });
+    // Bounds are in bytes, not UTF-16 units: 33 3-byte runes is 99 bytes
+    // of key, past the 64-byte limit even though .length is 33. (It is
+    // also out of charset, which is the error the caller sees first.)
+    await reject({ ["é".repeat(33)]: "v" });
+    // Empty key or value.
+    await reject({ "": "v" });
+    await reject({ k: "" });
+    expect(gotTag).toBe("unset");
+
+    // The boundary values themselves pass.
+    await c.generate({
+      model: "m",
+      messages: [userText("x")],
+      costTags: { ["k".repeat(64)]: "v".repeat(128) },
+    });
+    expect(gotTag).toBe(`${"k".repeat(64)}=${"v".repeat(128)}`);
+
+    // Values may carry ":" and "/", which keys may not.
+    await c.generate({
+      model: "m",
+      messages: [userText("x")],
+      costTags: { "svc.name-1_2": "team/web:prod" },
+    });
+    expect(gotTag).toBe("svc.name-1_2=team/web:prod");
   });
 
   test("tokenSource wins over apiKey", async () => {

@@ -107,7 +107,12 @@ export interface LuxRequest {
   user_id?: string;
   /** Cost-attribution tags for this call, sent as the `Lux-Cost-Tag`
    * header (not a wire body field). Overrides the client's `costTags`
-   * default. */
+   * default.
+   *
+   * Keys match `[A-Za-z0-9._-]+`, values `[A-Za-z0-9._:/-]+` (keys at
+   * most 64 bytes, values 128, at most 8 pairs). The wire form has no
+   * escaping, so out-of-charset input throws `LuxError` locally rather
+   * than being sent. */
   costTags?: Record<string, string>;
 }
 
@@ -193,7 +198,9 @@ export interface LuxClientOptions {
   /** Per-call bearer (e.g. a rotating JWT); wins over apiKey. */
   tokenSource?: () => Promise<string> | string;
   /** Default cost-attribution tags for every call (header
-   * `Lux-Cost-Tag`); a per-request `costTags` overrides it. */
+   * `Lux-Cost-Tag`); a per-request `costTags` overrides it. Keys match
+   * `[A-Za-z0-9._-]+`, values `[A-Za-z0-9._:/-]+`; out-of-charset input
+   * throws `LuxError` on the first call rather than being sent. */
   costTags?: Record<string, string>;
   /** Override the fetch implementation (tests, custom agents). */
   fetch?: typeof fetch;
@@ -225,16 +232,71 @@ const LOSS_HEADER = "X-Lux-Compat-Loss";
 const ESTIMATED_HEADER = "X-Lux-Compat-Estimated";
 const COST_TAG_HEADER = "Lux-Cost-Tag";
 
+/** Cost-tag charset and bounds, mirroring the gateway's own validator.
+ * The wire form has no escaping mechanism: the gateway splits the header
+ * on "," and cuts each pair on "=", so a value carrying either character
+ * would silently become extra tags rather than fail. Both sides therefore
+ * restrict the charset instead. */
+const COST_TAG_KEY_RE = /^[A-Za-z0-9._-]+$/;
+const COST_TAG_VALUE_RE = /^[A-Za-z0-9._:/-]+$/;
+const MAX_COST_TAG_PAIRS = 8;
+/** Byte, not UTF-16 unit: the gateway measures with Go's len(). */
+const MAX_COST_TAG_KEY_BYTES = 64;
+const MAX_COST_TAG_VALUE_BYTES = 128;
+
+const utf8 = new TextEncoder();
+
+/** Local rejection of a request the gateway would refuse, or worse, would
+ * accept as something the caller did not write. `status` is 0: nothing
+ * was sent. */
+function costTagError(message: string): LuxError {
+  return new LuxError(0, "invalid_request_error", message);
+}
+
 /** Serialize cost tags to the `Lux-Cost-Tag` wire form: sorted
  * `key=value` pairs joined by commas, no spaces. An empty/undefined
- * map yields "". */
+ * map yields "".
+ *
+ * Keys allow `A-Za-z0-9._-`, values additionally `:` and `/`; keys are at
+ * most 64 bytes, values at most 128, and a map carries at most 8 pairs.
+ * Anything else throws `LuxError` before the request leaves the process. */
 function formatCostTags(tags?: Record<string, string>): string {
   if (!tags) {
     return "";
   }
-  return Object.keys(tags)
-    .sort()
-    .map((k) => `${k}=${tags[k]}`)
+  const keys = Object.keys(tags).sort();
+  if (keys.length > MAX_COST_TAG_PAIRS) {
+    throw costTagError(
+      `cost tags have ${keys.length} dimensions, at most ${MAX_COST_TAG_PAIRS} are allowed`,
+    );
+  }
+  return keys
+    .map((k) => {
+      const v = tags[k] ?? "";
+      // Charset first: a non-ASCII key is out of charset anyway, and
+      // saying so is more useful than a byte-count complaint.
+      if (!COST_TAG_KEY_RE.test(k)) {
+        throw costTagError(
+          `cost tag key ${JSON.stringify(k)} has an invalid character; allowed: A-Za-z0-9._-`,
+        );
+      }
+      if (!COST_TAG_VALUE_RE.test(v)) {
+        throw costTagError(
+          `cost tag value for ${JSON.stringify(k)} has an invalid character; allowed: A-Za-z0-9._:/-`,
+        );
+      }
+      if (utf8.encode(k).length > MAX_COST_TAG_KEY_BYTES) {
+        throw costTagError(
+          `cost tag key ${JSON.stringify(k)} exceeds ${MAX_COST_TAG_KEY_BYTES} bytes`,
+        );
+      }
+      if (utf8.encode(v).length > MAX_COST_TAG_VALUE_BYTES) {
+        throw costTagError(
+          `cost tag value for ${JSON.stringify(k)} exceeds ${MAX_COST_TAG_VALUE_BYTES} bytes`,
+        );
+      }
+      return `${k}=${v}`;
+    })
     .join(",");
 }
 
