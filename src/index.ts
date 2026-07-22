@@ -447,26 +447,65 @@ async function* sseEvents(
 ): AsyncGenerator<LuxEvent> {
   const decoder = new TextDecoder();
   let buf = "";
+  let eof = false;
+  let frame: string[] = [];
+
+  // One complete line, or null when the buffer holds only a partial one.
+  // Line terminators are CR, LF, or CRLF; a trailing CR is held back
+  // until more input arrives, since the LF of a CRLF pair can land in
+  // the next chunk.
+  const takeLine = (): string | null => {
+    const i = buf.search(/[\r\n]/);
+    if (i < 0) {
+      return null;
+    }
+    const line = buf.slice(0, i);
+    if (buf[i] === "\r") {
+      if (i + 1 === buf.length && !eof) {
+        return null;
+      }
+      buf = buf.slice(buf[i + 1] === "\n" ? i + 2 : i + 1);
+    } else {
+      buf = buf.slice(i + 1);
+    }
+    return line;
+  };
+
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) {
-        break;
+        eof = true;
+      } else {
+        buf += decoder.decode(value, { stream: true });
       }
-      buf += decoder.decode(value, { stream: true });
-      let sep: number;
-      while ((sep = buf.indexOf("\n\n")) >= 0) {
-        const frame = buf.slice(0, sep);
-        buf = buf.slice(sep + 2);
-        const ev = parseFrame(frame);
-        if (ev !== null) {
-          yield ev;
+      for (;;) {
+        const line = takeLine();
+        if (line === null) {
+          break;
         }
+        // A blank line closes the frame; frames yield as they complete,
+        // never buffered to the end of the stream.
+        if (line === "") {
+          const ev = parseFrame(frame);
+          frame = [];
+          if (ev !== null) {
+            yield ev;
+          }
+          continue;
+        }
+        frame.push(line);
+      }
+      if (eof) {
+        break;
       }
     }
     // A final unterminated frame still parses (stream cut early).
-    if (buf.trim() !== "") {
-      const ev = parseFrame(buf);
+    if (buf !== "") {
+      frame.push(buf);
+    }
+    if (frame.length > 0) {
+      const ev = parseFrame(frame);
       if (ev !== null) {
         yield ev;
       }
@@ -476,14 +515,18 @@ async function* sseEvents(
   }
 }
 
-function parseFrame(frame: string): LuxEvent | null {
+function parseFrame(lines: string[]): LuxEvent | null {
   let name = "";
   const dataLines: string[] = [];
-  for (const line of frame.split("\n")) {
+  for (const line of lines) {
+    if (line.startsWith(":")) {
+      continue; // comment / keep-alive
+    }
     if (line.startsWith("event:")) {
       name = line.slice(6).trim();
     } else if (line.startsWith("data:")) {
-      dataLines.push(line.slice(5).trimStart());
+      const d = line.slice(5);
+      dataLines.push(d.startsWith(" ") ? d.slice(1) : d);
     }
   }
   const data = dataLines.join("\n");
@@ -504,7 +547,15 @@ function parseFrame(frame: string): LuxEvent | null {
   if (!VALID_EVENTS.has(name)) {
     return null;
   }
-  const ev = JSON.parse(data) as LuxEvent;
+  let ev: LuxEvent;
+  try {
+    ev = JSON.parse(data) as LuxEvent;
+  } catch {
+    // A producer that emits a truncated or non-JSON payload is a stream
+    // fault, not a caller error: surface it typed rather than leaking a
+    // raw SyntaxError out of the iterator.
+    throw new LuxStreamError("", `malformed ${name} payload: ${data}`);
+  }
   if (!ev.type) {
     ev.type = name as EventType;
   }

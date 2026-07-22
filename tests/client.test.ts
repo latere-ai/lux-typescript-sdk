@@ -398,6 +398,101 @@ describe("stream", () => {
     expect(types).toEqual(["message_start", "message_stop"]);
   });
 
+  // SSE line terminators are CR, LF, or CRLF. luxd emits LF, but an
+  // intermediary or a non-luxd producer may not, and the frame must
+  // parse identically either way.
+  test("CRLF-delimited frames parse into the same events", async () => {
+    handler = () =>
+      new Response(streamBody.replace(/\n/g, "\r\n"), {
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    const c = new LuxClient(base);
+    const st = await c.stream({ model: "m", messages: [userText("x")] });
+    let text = "";
+    const types: string[] = [];
+    for await (const ev of st) {
+      types.push(ev.type);
+      if (ev.type === "text_delta") {
+        text += ev.delta ?? "";
+      }
+    }
+    expect(text).toBe("hello");
+    expect(types).toEqual([
+      "message_start",
+      "block_start",
+      "text_delta",
+      "text_delta",
+      "block_stop",
+      "message_delta",
+      "message_stop",
+    ]);
+  });
+
+  test("a malformed data payload surfaces as LuxStreamError", async () => {
+    handler = () =>
+      new Response(`event: text_delta\ndata: {"index":0,\n\n`, {
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    const c = new LuxClient(base);
+    const st = await c.stream({ model: "m", messages: [userText("x")] });
+    try {
+      for await (const _ of st) {
+        throw new Error("unreachable");
+      }
+      throw new Error("unreachable");
+    } catch (err) {
+      expect(err).toBeInstanceOf(LuxStreamError);
+      expect((err as LuxStreamError).message).toContain("malformed");
+    }
+  });
+
+  test("comment keep-alive lines are ignored", async () => {
+    handler = () =>
+      new Response(
+        `: ping\n\n` +
+          `event: message_start\n: mid-frame comment\ndata: {"type":"message_start","index":0}\n\n` +
+          `:\n\n` +
+          `event: message_stop\ndata: {"type":"message_stop","index":0}\n\n`,
+        { headers: { "Content-Type": "text/event-stream" } },
+      );
+    const c = new LuxClient(base);
+    const st = await c.stream({ model: "m", messages: [userText("x")] });
+    const types: string[] = [];
+    for await (const ev of st) {
+      types.push(ev.type);
+    }
+    expect(types).toEqual(["message_start", "message_stop"]);
+  });
+
+  // A streaming client that only yields at EOF is not streaming. The
+  // frame must surface while the connection is still open.
+  // The body is fed directly rather than through the fake gateway: the
+  // HTTP layer coalesces small writes, which would hide the property
+  // under test.
+  test("events are delivered before the stream ends", async () => {
+    const enc = new TextEncoder();
+    let ctrl!: ReadableStreamDefaultController<Uint8Array>;
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        ctrl = c;
+      },
+    });
+    // Cast because `typeof fetch` carries Bun's `preconnect` property,
+    // which a plain function stub has no reason to implement.
+    const stub = async () =>
+      new Response(body, { headers: { "Content-Type": "text/event-stream" } });
+    const c = new LuxClient(base, { fetch: stub as unknown as typeof fetch });
+    const st = await c.stream({ model: "m", messages: [userText("x")] });
+    const it = st[Symbol.asyncIterator]();
+    const pending = it.next();
+    ctrl.enqueue(enc.encode(`event: message_start\r\ndata: {"type":"message_start","index":0}\r\n\r\n`));
+    const first = await pending; // hangs if the parser buffers to EOF
+    expect(first.done).toBe(false);
+    expect(first.value?.type).toBe("message_start");
+    ctrl.close();
+    await st.close();
+  });
+
   test("close releases the stream early", async () => {
     handler = () =>
       new Response(streamBody, { headers: { "Content-Type": "text/event-stream" } });
