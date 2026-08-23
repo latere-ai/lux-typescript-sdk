@@ -408,7 +408,15 @@ export class LuxClient {
 
 function parseLoss(resp: globalThis.Response): string[] {
   const v = resp.headers.get(LOSS_HEADER);
-  return v ? v.split(",") : [];
+  if (!v) {
+    return [];
+  }
+  // The RFC 9110 list production permits OWS around commas and empty elements a
+  // recipient must ignore, so trim every element and drop the empty ones.
+  return v
+    .split(",")
+    .map((e) => e.trim())
+    .filter((e) => e !== "");
 }
 
 async function decodeError(resp: globalThis.Response): Promise<LuxError> {
