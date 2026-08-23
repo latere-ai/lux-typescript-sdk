@@ -567,6 +567,42 @@ describe("stream", () => {
     const st = await c.stream({ model: "m", messages: [userText("x")] });
     await st.close();
   });
+
+  // A live network stream has no replay buffer, so a second iteration
+  // cannot return the events the first one consumed. Failing loud beats
+  // what the shared reader gave: a second `for await` that read an
+  // exhausted reader and completed with zero events and no error.
+  test("a second iteration throws instead of yielding zero events", async () => {
+    handler = () =>
+      new Response(streamBody, { headers: { "Content-Type": "text/event-stream" } });
+    const c = new LuxClient(base);
+    const st = await c.stream({ model: "m", messages: [userText("x")] });
+
+    const first: LuxEvent[] = [];
+    for await (const ev of st) {
+      first.push(ev);
+    }
+    expect(first.length).toBe(7); // the first pass drains the stream
+
+    const second: LuxEvent[] = [];
+    let err: unknown;
+    try {
+      for await (const ev of st) {
+        second.push(ev);
+      }
+    } catch (e) {
+      err = e;
+    }
+    expect(second).toEqual([]);
+    expect(err).toBeInstanceOf(LuxError);
+    expect((err as LuxError).status).toBe(0);
+    expect((err as LuxError).code).toBe("invalid_request_error");
+    expect((err as LuxError).message).toContain("already consumed");
+
+    // A helper that asks for the iterator directly must see the same
+    // failure, not an iterator that yields nothing.
+    expect(() => st[Symbol.asyncIterator]()).toThrow(LuxError);
+  });
 });
 
 // The load-bearing compatibility property of the environment fallback is

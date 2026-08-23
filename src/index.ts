@@ -305,7 +305,12 @@ function formatCostTags(tags?: Record<string, string>): string {
 
 /** A live event stream. Iterate with `for await`; iteration ends
  * after message_stop. `loss` lists request fields the backend dialect
- * could not represent. */
+ * could not represent.
+ *
+ * The stream is single-use. It reads one network connection and holds
+ * no replay buffer, so a second iteration throws a `LuxError` with
+ * status 0 and code `invalid_request_error`. Collect the events into
+ * an array if more than one pass is needed. */
 export interface LuxStream extends AsyncIterable<LuxEvent> {
   readonly loss: string[];
   /** Release the underlying connection early. */
@@ -390,12 +395,29 @@ export class LuxClient {
     }
     const loss = parseLoss(resp);
     const reader = resp.body.getReader();
+    // Every iterator reads the one reader, and the first pass drains it,
+    // so a later pass would read `{ done: true }` and end with no events.
+    // Reject it instead: the caller learns the stream is spent rather
+    // than seeing an empty result that looks like a quiet backend.
+    // The check stays synchronous so a direct `[Symbol.asyncIterator]()`
+    // call fails at once, not at the first `next()`.
+    let consumed = false;
     return {
       loss,
       close: async () => {
         await reader.cancel();
       },
-      [Symbol.asyncIterator]: () => sseEvents(reader),
+      [Symbol.asyncIterator]: () => {
+        if (consumed) {
+          throw new LuxError(
+            0,
+            "invalid_request_error",
+            "stream already consumed; a LuxStream can be iterated only once",
+          );
+        }
+        consumed = true;
+        return sseEvents(reader);
+      },
     };
   }
 

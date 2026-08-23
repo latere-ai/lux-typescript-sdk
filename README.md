@@ -76,6 +76,11 @@ mid-stream gateway failure throws `LuxStreamError`. `st.close()`
 releases the connection early, without draining the rest of the
 events.
 
+A stream is single-use: it reads one connection and keeps no replay
+buffer, so a second `for await` over the same stream throws a
+`LuxError`. Collect the events into an array to read them more than
+once.
+
 ## Token counting
 
 ```ts
@@ -147,7 +152,7 @@ represent are never silently dropped: they arrive as `result.loss` /
 | `LuxRequest` | interface | One request: `model`, `messages`, `system`, `tools`, `tool_choice`, `max_tokens`, `temperature`, `top_p`, `top_k`, `stop_sequences`, `reasoning`, `schema`, `user_id`, `costTags`. |
 | `LuxResult` | interface | `generate`'s return: a `LuxResponse` plus `loss`. |
 | `LuxResponse`, `Usage` | interface | `id`, `model`, `blocks`, `stop_reason`, `stop_sequence`, `usage`. |
-| `LuxStream`, `LuxEvent` | interface | The async-iterable stream and its event frames. |
+| `LuxStream`, `LuxEvent` | interface | The single-use async-iterable stream and its event frames. |
 | `TokenCount` | interface | `countTokens`'s return: `input_tokens`, `estimated`. |
 | `Message`, `Block`, `Image`, `Tool`, `ToolUse`, `ToolResult`, `ToolChoice`, `Reasoning`, `ResponseSchema` | interface | Wire shapes, snake_case verbatim. |
 | `Role`, `BlockType`, `ToolChoiceMode`, `Effort`, `StopReason`, `EventType` | type | Wire enums, open where the wire is open. |
