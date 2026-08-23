@@ -101,13 +101,19 @@ const c = new LuxClient("https://lux.latere.ai", {
   costTags: { tenant: "acme" }, // client-wide default
 });
 
-// Per call; overrides the client default.
+// Per call; replaces the client default.
 const res = await c.generate({
   model: "claude-sonnet-5",
   messages: [userText("Hi")],
   costTags: { tenant: "acme", project: "web" }, // sent as project=web,tenant=acme
 });
 ```
+
+A per-call `costTags` replaces the client default only when it holds at
+least one pair. An empty map (`{}`) counts as no per-call tags, so the
+client default applies, the same as if you omit the field. This keeps
+code that builds tags dynamically from losing cost attribution silently.
+While a client default is set, you cannot send a call with no tags.
 
 Tags come from a restricted charset, because the header format has no
 escaping: keys match `[A-Za-z0-9._-]+`, values additionally allow `:` and
