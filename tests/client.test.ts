@@ -320,6 +320,38 @@ describe("countTokens", () => {
     expect(tc.input_tokens).toBe(7);
     expect(tc.estimated).toBe(true);
   });
+
+  // The caller feeds this one scalar straight into arithmetic, so a body
+  // that carries no usable count must fail loudly instead of returning a
+  // value that reads as a plausible count.
+  const malformed: Array<[string, unknown, string]> = [
+    ["missing field", {}, "undefined"],
+    ["null", { input_tokens: null }, "null"],
+    ["string", { input_tokens: "42" }, '"42"'],
+    ["NaN from a JSON string", { input_tokens: "not a number" }, '"not a number"'],
+    ["negative", { input_tokens: -1 }, "-1"],
+  ];
+  for (const [name, body, shown] of malformed) {
+    test(`malformed count body is rejected: ${name}`, async () => {
+      handler = () =>
+        new Response(JSON.stringify(body), {
+          headers: { "Content-Type": "application/json" },
+        });
+      const c = new LuxClient(base, { apiKey: "k" });
+      let thrown: unknown;
+      try {
+        await c.countTokens({ model: "m", messages: [userText("hi")] });
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toBeInstanceOf(LuxError);
+      const err = thrown as LuxError;
+      expect(err.status).toBe(0);
+      expect(err.code).toBe("invalid_request_error");
+      expect(err.message).toContain("input_tokens");
+      expect(err.message).toContain(shown);
+    });
+  }
 });
 
 describe("stream", () => {

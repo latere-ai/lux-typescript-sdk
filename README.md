@@ -83,6 +83,11 @@ const tc = await c.countTokens({ model: "claude-sonnet-5", messages: [userText("
 // tc.input_tokens; tc.estimated is true when the target has no native tokenizer
 ```
 
+`tc.input_tokens` is always a real, non-negative number: a 200 response
+that carries no usable count throws `LuxError` with code
+`invalid_request_error`, so a malformed body can never reach your
+budget or cost arithmetic as a plausible count.
+
 ## Auth
 
 `apiKey` is a static bearer (a Lux virtual key). `tokenSource` supplies
