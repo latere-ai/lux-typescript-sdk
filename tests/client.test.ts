@@ -69,6 +69,22 @@ describe("generate", () => {
     expect(res.loss).toEqual(["top_k", "thinking"]);
   });
 
+  test("loss header tolerates optional whitespace and empty elements", async () => {
+    handler = () =>
+      new Response(okResponse, {
+        headers: {
+          "Content-Type": "application/json",
+          // RFC 9110 list production: OWS around commas, plus empty elements
+          // that a recipient must ignore.
+          "X-Lux-Compat-Loss": " top_k , thinking ,, ",
+        },
+      });
+    const c = new LuxClient(base, { apiKey: "lux_k1" });
+    const res = await c.generate({ model: "claude-sonnet-5", messages: [userText("hi")] });
+    expect(res.loss).toEqual(["top_k", "thinking"]);
+    expect(res.loss.includes("thinking")).toBe(true);
+  });
+
   test("error envelope decodes into LuxError", async () => {
     handler = () =>
       new Response(
@@ -143,6 +159,25 @@ describe("generate", () => {
 
     await c.generate({ model: "m", messages: [userText("x")], costTags: { tenant: "acme" } });
     expect(gotTag).toBe("tenant=acme");
+  });
+
+  // A caller that builds tags dynamically can end up with {}. That carries
+  // no tags, so it must read as "no per-call tags" and defer to the client
+  // default, exactly like omitting the field.
+  test("empty per-call cost tags fall back to the client default", async () => {
+    let gotTag = "unset";
+    handler = (req) => {
+      gotTag = req.headers.get("Lux-Cost-Tag") ?? "";
+      return new Response(okResponse, { headers: { "Content-Type": "application/json" } });
+    };
+    const c = new LuxClient(base, { costTags: { tenant: "default" } });
+    await c.generate({ model: "m", messages: [userText("x")], costTags: {} });
+    expect(gotTag).toBe("tenant=default");
+
+    // Omission is the reference behavior the empty map must match.
+    gotTag = "unset";
+    await c.generate({ model: "m", messages: [userText("x")] });
+    expect(gotTag).toBe("tenant=default");
   });
 
   // The wire form has no escaping: the gateway splits the header on ","

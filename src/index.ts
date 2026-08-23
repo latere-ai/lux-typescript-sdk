@@ -106,8 +106,10 @@ export interface LuxRequest {
   schema?: ResponseSchema;
   user_id?: string;
   /** Cost-attribution tags for this call, sent as the `Lux-Cost-Tag`
-   * header (not a wire body field). Overrides the client's `costTags`
-   * default.
+   * header (not a wire body field). Replaces the client's `costTags`
+   * default when it holds at least one pair; omitted or empty (`{}`),
+   * the client default applies. There is no way to send a call with no
+   * tags while the client default is set.
    *
    * Keys match `[A-Za-z0-9._-]+`, values `[A-Za-z0-9._:/-]+` (keys at
    * most 64 bytes, values 128, at most 8 pairs). The wire form has no
@@ -198,7 +200,8 @@ export interface LuxClientOptions {
   /** Per-call bearer (e.g. a rotating JWT); wins over apiKey. */
   tokenSource?: () => Promise<string> | string;
   /** Default cost-attribution tags for every call (header
-   * `Lux-Cost-Tag`); a per-request `costTags` overrides it. Keys match
+   * `Lux-Cost-Tag`); a non-empty per-request `costTags` replaces it, an
+   * empty or omitted one keeps it. Keys match
    * `[A-Za-z0-9._-]+`, values `[A-Za-z0-9._:/-]+`; out-of-charset input
    * throws `LuxError` on the first call rather than being sent. */
   costTags?: Record<string, string>;
@@ -406,7 +409,12 @@ export class LuxClient {
     if (bearer) {
       headers["Authorization"] = `Bearer ${bearer}`;
     }
-    const tags = formatCostTags(costTags ?? this.opts.costTags);
+    // An empty per-call map carries no tags, so it means "no per-call
+    // tags" and defers to the client default, like omitting the field.
+    // A caller that builds tags dynamically otherwise loses the default
+    // silently, and cost attribution disappears without an error.
+    const perCall = costTags && Object.keys(costTags).length > 0 ? costTags : undefined;
+    const tags = formatCostTags(perCall ?? this.opts.costTags);
     if (tags) {
       headers[COST_TAG_HEADER] = tags;
     }
@@ -424,7 +432,15 @@ export class LuxClient {
 
 function parseLoss(resp: globalThis.Response): string[] {
   const v = resp.headers.get(LOSS_HEADER);
-  return v ? v.split(",") : [];
+  if (!v) {
+    return [];
+  }
+  // The RFC 9110 list production permits OWS around commas and empty elements a
+  // recipient must ignore, so trim every element and drop the empty ones.
+  return v
+    .split(",")
+    .map((e) => e.trim())
+    .filter((e) => e !== "");
 }
 
 async function decodeError(resp: globalThis.Response): Promise<LuxError> {
