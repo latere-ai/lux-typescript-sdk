@@ -69,6 +69,22 @@ describe("generate", () => {
     expect(res.loss).toEqual(["top_k", "thinking"]);
   });
 
+  test("loss header tolerates optional whitespace and empty elements", async () => {
+    handler = () =>
+      new Response(okResponse, {
+        headers: {
+          "Content-Type": "application/json",
+          // RFC 9110 list production: OWS around commas, plus empty elements
+          // that a recipient must ignore.
+          "X-Lux-Compat-Loss": " top_k , thinking ,, ",
+        },
+      });
+    const c = new LuxClient(base, { apiKey: "lux_k1" });
+    const res = await c.generate({ model: "claude-sonnet-5", messages: [userText("hi")] });
+    expect(res.loss).toEqual(["top_k", "thinking"]);
+    expect(res.loss.includes("thinking")).toBe(true);
+  });
+
   test("error envelope decodes into LuxError", async () => {
     handler = () =>
       new Response(
@@ -143,6 +159,25 @@ describe("generate", () => {
 
     await c.generate({ model: "m", messages: [userText("x")], costTags: { tenant: "acme" } });
     expect(gotTag).toBe("tenant=acme");
+  });
+
+  // A caller that builds tags dynamically can end up with {}. That carries
+  // no tags, so it must read as "no per-call tags" and defer to the client
+  // default, exactly like omitting the field.
+  test("empty per-call cost tags fall back to the client default", async () => {
+    let gotTag = "unset";
+    handler = (req) => {
+      gotTag = req.headers.get("Lux-Cost-Tag") ?? "";
+      return new Response(okResponse, { headers: { "Content-Type": "application/json" } });
+    };
+    const c = new LuxClient(base, { costTags: { tenant: "default" } });
+    await c.generate({ model: "m", messages: [userText("x")], costTags: {} });
+    expect(gotTag).toBe("tenant=default");
+
+    // Omission is the reference behavior the empty map must match.
+    gotTag = "unset";
+    await c.generate({ model: "m", messages: [userText("x")] });
+    expect(gotTag).toBe("tenant=default");
   });
 
   // The wire form has no escaping: the gateway splits the header on ","
@@ -285,6 +320,38 @@ describe("countTokens", () => {
     expect(tc.input_tokens).toBe(7);
     expect(tc.estimated).toBe(true);
   });
+
+  // The caller feeds this one scalar straight into arithmetic, so a body
+  // that carries no usable count must fail loudly instead of returning a
+  // value that reads as a plausible count.
+  const malformed: Array<[string, unknown, string]> = [
+    ["missing field", {}, "undefined"],
+    ["null", { input_tokens: null }, "null"],
+    ["string", { input_tokens: "42" }, '"42"'],
+    ["NaN from a JSON string", { input_tokens: "not a number" }, '"not a number"'],
+    ["negative", { input_tokens: -1 }, "-1"],
+  ];
+  for (const [name, body, shown] of malformed) {
+    test(`malformed count body is rejected: ${name}`, async () => {
+      handler = () =>
+        new Response(JSON.stringify(body), {
+          headers: { "Content-Type": "application/json" },
+        });
+      const c = new LuxClient(base, { apiKey: "k" });
+      let thrown: unknown;
+      try {
+        await c.countTokens({ model: "m", messages: [userText("hi")] });
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toBeInstanceOf(LuxError);
+      const err = thrown as LuxError;
+      expect(err.status).toBe(0);
+      expect(err.code).toBe("invalid_request_error");
+      expect(err.message).toContain("input_tokens");
+      expect(err.message).toContain(shown);
+    });
+  }
 });
 
 describe("stream", () => {
@@ -538,6 +605,42 @@ describe("stream", () => {
     const st = await c.stream({ model: "m", messages: [userText("x")] });
     await st.close();
   });
+
+  // A live network stream has no replay buffer, so a second iteration
+  // cannot return the events the first one consumed. Failing loud beats
+  // what the shared reader gave: a second `for await` that read an
+  // exhausted reader and completed with zero events and no error.
+  test("a second iteration throws instead of yielding zero events", async () => {
+    handler = () =>
+      new Response(streamBody, { headers: { "Content-Type": "text/event-stream" } });
+    const c = new LuxClient(base);
+    const st = await c.stream({ model: "m", messages: [userText("x")] });
+
+    const first: LuxEvent[] = [];
+    for await (const ev of st) {
+      first.push(ev);
+    }
+    expect(first.length).toBe(7); // the first pass drains the stream
+
+    const second: LuxEvent[] = [];
+    let err: unknown;
+    try {
+      for await (const ev of st) {
+        second.push(ev);
+      }
+    } catch (e) {
+      err = e;
+    }
+    expect(second).toEqual([]);
+    expect(err).toBeInstanceOf(LuxError);
+    expect((err as LuxError).status).toBe(0);
+    expect((err as LuxError).code).toBe("invalid_request_error");
+    expect((err as LuxError).message).toContain("already consumed");
+
+    // A helper that asks for the iterator directly must see the same
+    // failure, not an iterator that yields nothing.
+    expect(() => st[Symbol.asyncIterator]()).toThrow(LuxError);
+  });
 });
 
 // The load-bearing compatibility property of the environment fallback is
@@ -592,6 +695,28 @@ describe("environment fallback", () => {
   test("a missing credential stays empty", async () => {
     setEnv(base, undefined);
     expect(await authFor(new LuxClient())).toBe("");
+  });
+
+  // The credential is resolved per request, so a client that kept the
+  // caller's object would follow every later write to it. Reusing one
+  // literal for several clients, or clearing a secret after handing it
+  // over, must not change or blank what is already on the wire.
+  test("a later write to the caller's options cannot change the credential", async () => {
+    setEnv(base, undefined);
+    const opts: { apiKey?: string } = { apiKey: "lux_original" };
+    const c = new LuxClient(base, opts);
+    opts.apiKey = "lux_replaced";
+    expect(await authFor(c)).toBe("Bearer lux_original");
+    delete opts.apiKey;
+    expect(await authFor(c)).toBe("Bearer lux_original");
+  });
+
+  test("a later write to the caller's options cannot change the tokenSource", async () => {
+    setEnv(base, undefined);
+    const opts: { tokenSource?: () => string } = { tokenSource: () => "live" };
+    const c = new LuxClient(base, opts);
+    opts.tokenSource = () => "replaced";
+    expect(await authFor(c)).toBe("Bearer live");
   });
 
   // Constructed only, never called: these must not reach the public URL.

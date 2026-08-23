@@ -76,12 +76,22 @@ mid-stream gateway failure throws `LuxStreamError`. `st.close()`
 releases the connection early, without draining the rest of the
 events.
 
+A stream is single-use: it reads one connection and keeps no replay
+buffer, so a second `for await` over the same stream throws a
+`LuxError`. Collect the events into an array to read them more than
+once.
+
 ## Token counting
 
 ```ts
 const tc = await c.countTokens({ model: "claude-sonnet-5", messages: [userText("Hi")] });
 // tc.input_tokens; tc.estimated is true when the target has no native tokenizer
 ```
+
+`tc.input_tokens` is always a real, non-negative number: a 200 response
+that carries no usable count throws `LuxError` with code
+`invalid_request_error`, so a malformed body can never reach your
+budget or cost arithmetic as a plausible count.
 
 ## Auth
 
@@ -101,13 +111,19 @@ const c = new LuxClient("https://lux.latere.ai", {
   costTags: { tenant: "acme" }, // client-wide default
 });
 
-// Per call; overrides the client default.
+// Per call; replaces the client default.
 const res = await c.generate({
   model: "claude-sonnet-5",
   messages: [userText("Hi")],
   costTags: { tenant: "acme", project: "web" }, // sent as project=web,tenant=acme
 });
 ```
+
+A per-call `costTags` replaces the client default only when it holds at
+least one pair. An empty map (`{}`) counts as no per-call tags, so the
+client default applies, the same as if you omit the field. This keeps
+code that builds tags dynamically from losing cost attribution silently.
+While a client default is set, you cannot send a call with no tags.
 
 Tags come from a restricted charset, because the header format has no
 escaping: keys match `[A-Za-z0-9._-]+`, values additionally allow `:` and
@@ -136,7 +152,7 @@ represent are never silently dropped: they arrive as `result.loss` /
 | `LuxRequest` | interface | One request: `model`, `messages`, `system`, `tools`, `tool_choice`, `max_tokens`, `temperature`, `top_p`, `top_k`, `stop_sequences`, `reasoning`, `schema`, `user_id`, `costTags`. |
 | `LuxResult` | interface | `generate`'s return: a `LuxResponse` plus `loss`. |
 | `LuxResponse`, `Usage` | interface | `id`, `model`, `blocks`, `stop_reason`, `stop_sequence`, `usage`. |
-| `LuxStream`, `LuxEvent` | interface | The async-iterable stream and its event frames. |
+| `LuxStream`, `LuxEvent` | interface | The single-use async-iterable stream and its event frames. |
 | `TokenCount` | interface | `countTokens`'s return: `input_tokens`, `estimated`. |
 | `Message`, `Block`, `Image`, `Tool`, `ToolUse`, `ToolResult`, `ToolChoice`, `Reasoning`, `ResponseSchema` | interface | Wire shapes, snake_case verbatim. |
 | `Role`, `BlockType`, `ToolChoiceMode`, `Effort`, `StopReason`, `EventType` | type | Wire enums, open where the wire is open. |
