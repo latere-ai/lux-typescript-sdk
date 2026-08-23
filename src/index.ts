@@ -344,13 +344,29 @@ export class LuxClient {
     return { ...out, loss: parseLoss(resp) };
   }
 
-  /** Token count without spending output tokens; no spend gates run. */
+  /** Token count without spending output tokens; no spend gates run.
+   *
+   * Throws `LuxError` with code `invalid_request_error` when the 200 body
+   * carries no usable `input_tokens`. The whole result is one scalar the
+   * caller does arithmetic on, so a missing, null, non-numeric, or
+   * negative value must fail loudly instead of reading as a real count. */
   async countTokens(req: LuxRequest): Promise<TokenCount> {
     const { costTags, ...rest } = req;
     const resp = await this.post(COUNT_TOKENS_PATH, { ...rest, stream: false }, costTags);
-    const body = (await resp.json()) as { input_tokens: number };
+    const body = (await resp.json()) as { input_tokens?: unknown };
+    const n = body?.input_tokens;
+    // Finite excludes NaN and the infinities; the lower bound rejects a
+    // count no tokenizer can produce. A fractional value stays legal:
+    // the estimated path may report a heuristic count.
+    if (typeof n !== "number" || !Number.isFinite(n) || n < 0) {
+      throw new LuxError(
+        0,
+        "invalid_request_error",
+        `count response field "input_tokens" is not a token count: ${JSON.stringify(n) ?? "undefined"}`,
+      );
+    }
     return {
-      input_tokens: body.input_tokens,
+      input_tokens: n,
       estimated: resp.headers.get(ESTIMATED_HEADER) === "true",
     };
   }
