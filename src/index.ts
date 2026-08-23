@@ -331,8 +331,11 @@ export class LuxClient {
   constructor(baseURL = "", opts: LuxClientOptions = {}) {
     const base = baseURL || envVar(ENV_BASE_URL) || DEFAULT_BASE_URL;
     this.baseURL = base.replace(/\/+$/, "");
+    // Both branches copy: the credential is resolved per request, so
+    // retaining the caller's object would let a later write to it
+    // redirect or blank a client that is already in use.
     this.opts =
-      opts.apiKey || opts.tokenSource ? opts : { ...opts, apiKey: envVar(ENV_API_KEY) };
+      opts.apiKey || opts.tokenSource ? { ...opts } : { ...opts, apiKey: envVar(ENV_API_KEY) };
     this.fetchFn = opts.fetch ?? fetch;
   }
 
