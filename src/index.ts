@@ -106,8 +106,10 @@ export interface LuxRequest {
   schema?: ResponseSchema;
   user_id?: string;
   /** Cost-attribution tags for this call, sent as the `Lux-Cost-Tag`
-   * header (not a wire body field). Overrides the client's `costTags`
-   * default.
+   * header (not a wire body field). Replaces the client's `costTags`
+   * default when it holds at least one pair; omitted or empty (`{}`),
+   * the client default applies. There is no way to send a call with no
+   * tags while the client default is set.
    *
    * Keys match `[A-Za-z0-9._-]+`, values `[A-Za-z0-9._:/-]+` (keys at
    * most 64 bytes, values 128, at most 8 pairs). The wire form has no
@@ -198,7 +200,8 @@ export interface LuxClientOptions {
   /** Per-call bearer (e.g. a rotating JWT); wins over apiKey. */
   tokenSource?: () => Promise<string> | string;
   /** Default cost-attribution tags for every call (header
-   * `Lux-Cost-Tag`); a per-request `costTags` overrides it. Keys match
+   * `Lux-Cost-Tag`); a non-empty per-request `costTags` replaces it, an
+   * empty or omitted one keeps it. Keys match
    * `[A-Za-z0-9._-]+`, values `[A-Za-z0-9._:/-]+`; out-of-charset input
    * throws `LuxError` on the first call rather than being sent. */
   costTags?: Record<string, string>;
@@ -336,8 +339,11 @@ export class LuxClient {
   constructor(baseURL = "", opts: LuxClientOptions = {}) {
     const base = baseURL || envVar(ENV_BASE_URL) || DEFAULT_BASE_URL;
     this.baseURL = base.replace(/\/+$/, "");
+    // Both branches copy: the credential is resolved per request, so
+    // retaining the caller's object would let a later write to it
+    // redirect or blank a client that is already in use.
     this.opts =
-      opts.apiKey || opts.tokenSource ? opts : { ...opts, apiKey: envVar(ENV_API_KEY) };
+      opts.apiKey || opts.tokenSource ? { ...opts } : { ...opts, apiKey: envVar(ENV_API_KEY) };
     this.fetchFn = opts.fetch ?? fetch;
   }
 
@@ -349,13 +355,29 @@ export class LuxClient {
     return { ...out, loss: parseLoss(resp) };
   }
 
-  /** Token count without spending output tokens; no spend gates run. */
+  /** Token count without spending output tokens; no spend gates run.
+   *
+   * Throws `LuxError` with code `invalid_request_error` when the 200 body
+   * carries no usable `input_tokens`. The whole result is one scalar the
+   * caller does arithmetic on, so a missing, null, non-numeric, or
+   * negative value must fail loudly instead of reading as a real count. */
   async countTokens(req: LuxRequest): Promise<TokenCount> {
     const { costTags, ...rest } = req;
     const resp = await this.post(COUNT_TOKENS_PATH, { ...rest, stream: false }, costTags);
-    const body = (await resp.json()) as { input_tokens: number };
+    const body = (await resp.json()) as { input_tokens?: unknown };
+    const n = body?.input_tokens;
+    // Finite excludes NaN and the infinities; the lower bound rejects a
+    // count no tokenizer can produce. A fractional value stays legal:
+    // the estimated path may report a heuristic count.
+    if (typeof n !== "number" || !Number.isFinite(n) || n < 0) {
+      throw new LuxError(
+        0,
+        "invalid_request_error",
+        `count response field "input_tokens" is not a token count: ${JSON.stringify(n) ?? "undefined"}`,
+      );
+    }
     return {
-      input_tokens: body.input_tokens,
+      input_tokens: n,
       estimated: resp.headers.get(ESTIMATED_HEADER) === "true",
     };
   }
@@ -412,7 +434,12 @@ export class LuxClient {
     if (bearer) {
       headers["Authorization"] = `Bearer ${bearer}`;
     }
-    const tags = formatCostTags(costTags ?? this.opts.costTags);
+    // An empty per-call map carries no tags, so it means "no per-call
+    // tags" and defers to the client default, like omitting the field.
+    // A caller that builds tags dynamically otherwise loses the default
+    // silently, and cost attribution disappears without an error.
+    const perCall = costTags && Object.keys(costTags).length > 0 ? costTags : undefined;
+    const tags = formatCostTags(perCall ?? this.opts.costTags);
     if (tags) {
       headers[COST_TAG_HEADER] = tags;
     }
@@ -430,7 +457,15 @@ export class LuxClient {
 
 function parseLoss(resp: globalThis.Response): string[] {
   const v = resp.headers.get(LOSS_HEADER);
-  return v ? v.split(",") : [];
+  if (!v) {
+    return [];
+  }
+  // The RFC 9110 list production permits OWS around commas and empty elements a
+  // recipient must ignore, so trim every element and drop the empty ones.
+  return v
+    .split(",")
+    .map((e) => e.trim())
+    .filter((e) => e !== "");
 }
 
 async function decodeError(resp: globalThis.Response): Promise<LuxError> {
