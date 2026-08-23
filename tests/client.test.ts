@@ -69,6 +69,22 @@ describe("generate", () => {
     expect(res.loss).toEqual(["top_k", "thinking"]);
   });
 
+  test("loss header tolerates optional whitespace and empty elements", async () => {
+    handler = () =>
+      new Response(okResponse, {
+        headers: {
+          "Content-Type": "application/json",
+          // RFC 9110 list production: OWS around commas, plus empty elements
+          // that a recipient must ignore.
+          "X-Lux-Compat-Loss": " top_k , thinking ,, ",
+        },
+      });
+    const c = new LuxClient(base, { apiKey: "lux_k1" });
+    const res = await c.generate({ model: "claude-sonnet-5", messages: [userText("hi")] });
+    expect(res.loss).toEqual(["top_k", "thinking"]);
+    expect(res.loss.includes("thinking")).toBe(true);
+  });
+
   test("error envelope decodes into LuxError", async () => {
     handler = () =>
       new Response(
