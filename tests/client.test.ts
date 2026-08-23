@@ -623,6 +623,28 @@ describe("environment fallback", () => {
     expect(await authFor(new LuxClient())).toBe("");
   });
 
+  // The credential is resolved per request, so a client that kept the
+  // caller's object would follow every later write to it. Reusing one
+  // literal for several clients, or clearing a secret after handing it
+  // over, must not change or blank what is already on the wire.
+  test("a later write to the caller's options cannot change the credential", async () => {
+    setEnv(base, undefined);
+    const opts: { apiKey?: string } = { apiKey: "lux_original" };
+    const c = new LuxClient(base, opts);
+    opts.apiKey = "lux_replaced";
+    expect(await authFor(c)).toBe("Bearer lux_original");
+    delete opts.apiKey;
+    expect(await authFor(c)).toBe("Bearer lux_original");
+  });
+
+  test("a later write to the caller's options cannot change the tokenSource", async () => {
+    setEnv(base, undefined);
+    const opts: { tokenSource?: () => string } = { tokenSource: () => "live" };
+    const c = new LuxClient(base, opts);
+    opts.tokenSource = () => "replaced";
+    expect(await authFor(c)).toBe("Bearer live");
+  });
+
   // Constructed only, never called: these must not reach the public URL.
   test("an unset base falls back to the public gateway", () => {
     setEnv(undefined, undefined);
