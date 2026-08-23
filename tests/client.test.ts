@@ -161,6 +161,25 @@ describe("generate", () => {
     expect(gotTag).toBe("tenant=acme");
   });
 
+  // A caller that builds tags dynamically can end up with {}. That carries
+  // no tags, so it must read as "no per-call tags" and defer to the client
+  // default, exactly like omitting the field.
+  test("empty per-call cost tags fall back to the client default", async () => {
+    let gotTag = "unset";
+    handler = (req) => {
+      gotTag = req.headers.get("Lux-Cost-Tag") ?? "";
+      return new Response(okResponse, { headers: { "Content-Type": "application/json" } });
+    };
+    const c = new LuxClient(base, { costTags: { tenant: "default" } });
+    await c.generate({ model: "m", messages: [userText("x")], costTags: {} });
+    expect(gotTag).toBe("tenant=default");
+
+    // Omission is the reference behavior the empty map must match.
+    gotTag = "unset";
+    await c.generate({ model: "m", messages: [userText("x")] });
+    expect(gotTag).toBe("tenant=default");
+  });
+
   // The wire form has no escaping: the gateway splits the header on ","
   // then cuts on "=". A "," or "=" inside a value therefore does not fail
   // loudly, it silently becomes extra tags, so the client must reject it.
