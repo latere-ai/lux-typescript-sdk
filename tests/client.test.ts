@@ -69,6 +69,22 @@ describe("generate", () => {
     expect(res.loss).toEqual(["top_k", "thinking"]);
   });
 
+  test("loss header tolerates optional whitespace and empty elements", async () => {
+    handler = () =>
+      new Response(okResponse, {
+        headers: {
+          "Content-Type": "application/json",
+          // RFC 9110 list production: OWS around commas, plus empty elements
+          // that a recipient must ignore.
+          "X-Lux-Compat-Loss": " top_k , thinking ,, ",
+        },
+      });
+    const c = new LuxClient(base, { apiKey: "lux_k1" });
+    const res = await c.generate({ model: "claude-sonnet-5", messages: [userText("hi")] });
+    expect(res.loss).toEqual(["top_k", "thinking"]);
+    expect(res.loss.includes("thinking")).toBe(true);
+  });
+
   test("error envelope decodes into LuxError", async () => {
     handler = () =>
       new Response(
@@ -143,6 +159,25 @@ describe("generate", () => {
 
     await c.generate({ model: "m", messages: [userText("x")], costTags: { tenant: "acme" } });
     expect(gotTag).toBe("tenant=acme");
+  });
+
+  // A caller that builds tags dynamically can end up with {}. That carries
+  // no tags, so it must read as "no per-call tags" and defer to the client
+  // default, exactly like omitting the field.
+  test("empty per-call cost tags fall back to the client default", async () => {
+    let gotTag = "unset";
+    handler = (req) => {
+      gotTag = req.headers.get("Lux-Cost-Tag") ?? "";
+      return new Response(okResponse, { headers: { "Content-Type": "application/json" } });
+    };
+    const c = new LuxClient(base, { costTags: { tenant: "default" } });
+    await c.generate({ model: "m", messages: [userText("x")], costTags: {} });
+    expect(gotTag).toBe("tenant=default");
+
+    // Omission is the reference behavior the empty map must match.
+    gotTag = "unset";
+    await c.generate({ model: "m", messages: [userText("x")] });
+    expect(gotTag).toBe("tenant=default");
   });
 
   // The wire form has no escaping: the gateway splits the header on ","
@@ -285,6 +320,38 @@ describe("countTokens", () => {
     expect(tc.input_tokens).toBe(7);
     expect(tc.estimated).toBe(true);
   });
+
+  // The caller feeds this one scalar straight into arithmetic, so a body
+  // that carries no usable count must fail loudly instead of returning a
+  // value that reads as a plausible count.
+  const malformed: Array<[string, unknown, string]> = [
+    ["missing field", {}, "undefined"],
+    ["null", { input_tokens: null }, "null"],
+    ["string", { input_tokens: "42" }, '"42"'],
+    ["NaN from a JSON string", { input_tokens: "not a number" }, '"not a number"'],
+    ["negative", { input_tokens: -1 }, "-1"],
+  ];
+  for (const [name, body, shown] of malformed) {
+    test(`malformed count body is rejected: ${name}`, async () => {
+      handler = () =>
+        new Response(JSON.stringify(body), {
+          headers: { "Content-Type": "application/json" },
+        });
+      const c = new LuxClient(base, { apiKey: "k" });
+      let thrown: unknown;
+      try {
+        await c.countTokens({ model: "m", messages: [userText("hi")] });
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toBeInstanceOf(LuxError);
+      const err = thrown as LuxError;
+      expect(err.status).toBe(0);
+      expect(err.code).toBe("invalid_request_error");
+      expect(err.message).toContain("input_tokens");
+      expect(err.message).toContain(shown);
+    });
+  }
 });
 
 describe("stream", () => {
