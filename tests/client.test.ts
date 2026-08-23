@@ -435,6 +435,44 @@ describe("stream", () => {
     );
   });
 
+  // RFC 9110 makes the media type case-insensitive, so an intermediary or a
+  // non-luxd producer may send "Text/Event-Stream" and still be conformant.
+  test("Content-Type media type matches case-insensitively", async () => {
+    handler = () =>
+      new Response(streamBody, {
+        headers: { "Content-Type": "Text/Event-Stream; charset=utf-8" },
+      });
+    const c = new LuxClient(base);
+    const st = await c.stream({ model: "m", messages: [userText("x")] });
+    const types: string[] = [];
+    for await (const ev of st) {
+      types.push(ev.type);
+    }
+    expect(types).toEqual([
+      "message_start",
+      "block_start",
+      "text_delta",
+      "text_delta",
+      "block_stop",
+      "message_delta",
+      "message_stop",
+    ]);
+  });
+
+  // The comparison is case-insensitive; the diagnostic is not, so an operator
+  // reading the error sees the casing the origin actually sent.
+  test("rejection message echoes the Content-Type as received", async () => {
+    handler = () => new Response(okResponse, { headers: { "Content-Type": "Application/JSON" } });
+    const c = new LuxClient(base);
+    try {
+      await c.stream({ model: "m", messages: [userText("x")] });
+      throw new Error("unreachable");
+    } catch (err) {
+      expect(err).toBeInstanceOf(LuxError);
+      expect((err as LuxError).message).toContain('"Application/JSON"');
+    }
+  });
+
   test("error status before the stream starts", async () => {
     handler = () =>
       new Response(JSON.stringify({ type: "error", error: { type: "permission_error", message: "no" } }), {

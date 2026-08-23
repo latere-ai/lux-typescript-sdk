@@ -387,7 +387,10 @@ export class LuxClient {
     const { costTags, ...body } = req;
     const resp = await this.post(GENERATE_PATH, { ...body, stream: true }, costTags);
     const ct = resp.headers.get("Content-Type") ?? "";
-    if (!ct.startsWith("text/event-stream")) {
+    // RFC 9110 section 8.3.1: type and subtype are case-insensitive, and the
+    // field grammar permits leading whitespace. Normalize for the comparison
+    // only; the error below reports the value as the origin sent it.
+    if (!ct.trimStart().toLowerCase().startsWith("text/event-stream")) {
       throw new LuxError(resp.status, "", `expected an event stream, got ${JSON.stringify(ct)}`);
     }
     if (!resp.body) {
