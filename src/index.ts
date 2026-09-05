@@ -614,9 +614,13 @@ function parseFrame(lines: string[]): LuxEvent | null {
   }
   let ev: LuxEvent;
   try {
-    ev = JSON.parse(data) as LuxEvent;
+    const parsed: unknown = JSON.parse(data);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("expected an event object");
+    }
+    ev = parsed as LuxEvent;
   } catch {
-    // A producer that emits a truncated or non-JSON payload is a stream
+    // A producer that emits invalid JSON or a non-object payload is a stream
     // fault, not a caller error: surface it typed rather than leaking a
     // raw SyntaxError out of the iterator.
     throw new LuxStreamError("", `malformed ${name} payload: ${data}`);

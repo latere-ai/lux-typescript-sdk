@@ -797,3 +797,22 @@ describe("stream response validation", () => {
     },
   );
 });
+
+describe("stream payload shape", () => {
+  test.each(["null", "[]", "7", '"text"', "true"])(
+    "rejects non-object payload %s as LuxStreamError", async (payload) => {
+      handler = () => new Response(`event: text_delta\ndata: ${payload}\n\n`, {
+        headers: { "Content-Type": "text/event-stream" },
+      });
+      const stream = await new LuxClient(base).stream({ model: "m", messages: [userText("x")] });
+      const events: LuxEvent[] = [];
+      let failure: unknown;
+      try {
+        for await (const event of stream) events.push(event);
+      } catch (error) { failure = error; }
+      expect(events).toEqual([]);
+      expect(failure).toBeInstanceOf(LuxStreamError);
+      expect((failure as LuxStreamError).message).toContain("malformed text_delta payload");
+    },
+  );
+});
