@@ -731,3 +731,48 @@ describe("environment fallback", () => {
     expect(new LuxClient()["baseURL"]).toBe("https://env.example");
   });
 });
+
+describe("terminal stream event", () => {
+  test("ignores frames after message_stop", async () => {
+    handler = () => new Response(
+      'event: message_stop\ndata: {"type":"message_stop","index":0}\n\n' +
+      'event: text_delta\ndata: {"type":"text_delta","index":0,"delta":"late"}\n\n',
+      { headers: { "Content-Type": "text/event-stream" } },
+    );
+    const stream = await new LuxClient(base).stream({ model: "m", messages: [userText("x")] });
+    const events: LuxEvent[] = [];
+    for await (const event of stream) events.push(event);
+    expect(events.map((event) => event.type)).toEqual(["message_stop"]);
+  });
+
+  test("finishes and cancels an open body after message_stop", async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(
+          'event: message_stop\ndata: {"type":"message_stop","index":0}\n\n',
+        ));
+      },
+      cancel() { cancelled = true; },
+    });
+    const stub = async () => new Response(body, { headers: { "Content-Type": "text/event-stream" } });
+    const stream = await new LuxClient(base, { fetch: stub as unknown as typeof fetch })
+      .stream({ model: "m", messages: [userText("x")] });
+    const iterator = stream[Symbol.asyncIterator]();
+    expect((await iterator.next()).value?.type).toBe("message_stop");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const next = await Promise.race([
+        iterator.next(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("waited for EOF after message_stop")), 250);
+        }),
+      ]);
+      expect(next.done).toBe(true);
+      expect(cancelled).toBe(true);
+    } finally {
+      clearTimeout(timer);
+      await stream.close();
+    }
+  });
+});

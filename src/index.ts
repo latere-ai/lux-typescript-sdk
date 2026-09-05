@@ -551,6 +551,9 @@ async function* sseEvents(
           frame = [];
           if (ev !== null) {
             yield ev;
+            if (ev.type === "message_stop") {
+              return;
+            }
           }
           continue;
         }
