@@ -390,7 +390,9 @@ export class LuxClient {
     // RFC 9110 section 8.3.1: type and subtype are case-insensitive, and the
     // field grammar permits leading whitespace. Normalize for the comparison
     // only; the error below reports the value as the origin sent it.
-    if (!ct.trimStart().toLowerCase().startsWith("text/event-stream")) {
+    const mediaType = ct.split(";", 1)[0]!.trim().toLowerCase();
+    if (mediaType !== "text/event-stream") {
+      await resp.body?.cancel().catch(() => {});
       throw new LuxError(resp.status, "", `expected an event stream, got ${JSON.stringify(ct)}`);
     }
     if (!resp.body) {

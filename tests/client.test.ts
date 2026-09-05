@@ -776,3 +776,24 @@ describe("terminal stream event", () => {
     }
   });
 });
+
+describe("stream response validation", () => {
+  test.each(["application/json", "text/event-stream-json"])(
+    "rejects %s and cancels the response body", async (contentType) => {
+      let cancelled = false;
+      const body = new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } });
+      const stub = async () => new Response(body, { headers: { "Content-Type": contentType } });
+      const client = new LuxClient(base, { fetch: stub as unknown as typeof fetch });
+      let accepted: { close(): Promise<void> } | undefined;
+      try {
+        const opening = client.stream({ model: "m", messages: [userText("x")] })
+          .then((stream) => { accepted = stream; return stream; });
+        await expect(opening).rejects.toBeInstanceOf(LuxError);
+        expect(cancelled).toBe(true);
+      } finally {
+        await accepted?.close();
+        if (!body.locked) await body.cancel();
+      }
+    },
+  );
+});
